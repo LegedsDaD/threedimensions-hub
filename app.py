@@ -1,222 +1,161 @@
 import streamlit as st
 import sqlite3
 import os
-import bcrypt
-from streamlit.components.v1 import html
+from datetime import datetime
+import base64
 
-# ---------------- CONFIG ----------------
+# =========================
+# CONFIG
+# =========================
 st.set_page_config(page_title="ThreeDimensions Hub", layout="wide")
-os.makedirs("models", exist_ok=True)
 
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("database.db", check_same_thread=False)
+MODEL_DIR = "models"
+DB_FILE = "database.db"
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# =========================
+# DATABASE SETUP
+# =========================
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
 c = conn.cursor()
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password BLOB
-)
-""")
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS models (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT,
     prompt TEXT,
-    file TEXT,
-    user_id INTEGER,
-    views INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    description TEXT,
+    filename TEXT,
+    created_at TEXT
 )
 """)
 
 c.execute("""
-CREATE TABLE IF NOT EXISTS likes (
-    user_id INTEGER,
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id INTEGER,
-    UNIQUE(user_id, model_id)
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS ratings (
-    user_id INTEGER,
-    model_id INTEGER,
-    rating INTEGER,
-    UNIQUE(user_id, model_id)
+    message TEXT,
+    created_at TEXT
 )
 """)
 
 conn.commit()
 
-# ---------------- STYLE ----------------
-st.markdown("""
-<style>
-body { background-color: #0f172a; color: white; }
-.stButton>button { background-color:#2563eb; color:white; }
-</style>
-""", unsafe_allow_html=True)
+# =========================
+# SIDEBAR NAVIGATION
+# =========================
+st.sidebar.title("ThreeDimensions Hub")
+page = st.sidebar.radio("Navigate", ["Upload Model", "Explore Models"])
 
-st.title("🚀 ThreeDimensions Hub")
+# =========================
+# UPLOAD PAGE
+# =========================
+if page == "Upload Model":
+    st.title("Upload Your 3D Model (.OBJ)")
 
-# ---------------- SESSION ----------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+    title = st.text_input("Model Title")
+    prompt = st.text_area("Prompt Used")
+    description = st.text_area("Description")
 
-# ---------------- AUTH ----------------
-if not st.session_state.user:
+    uploaded_file = st.file_uploader("Upload .OBJ file", type=["obj"])
 
-    mode = st.sidebar.selectbox("Account", ["Login", "Register"])
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    if st.button("Submit Model"):
+        if uploaded_file and title:
+            filepath = os.path.join(MODEL_DIR, uploaded_file.name)
 
-    if mode == "Register":
-        if st.button("Create Account"):
-            if username and password:
-                hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-                try:
-                    c.execute("INSERT INTO users (username,password) VALUES (?,?)",
-                              (username, hashed))
-                    conn.commit()
-                    st.success("Account created.")
-                except:
-                    st.error("Username already exists.")
+            with open(filepath, "wb") as f:
+                f.write(uploaded_file.read())
 
-    if mode == "Login":
-        if st.button("Login"):
-            c.execute("SELECT id,password FROM users WHERE username=?",
-                      (username,))
-            user = c.fetchone()
-            if user and bcrypt.checkpw(password.encode(), user[1]):
-                st.session_state.user = {"id": user[0], "username": username}
-                st.success("Logged in.")
-                st.rerun()
-            else:
-                st.error("Invalid credentials.")
+            c.execute("""
+                INSERT INTO models (title, prompt, description, filename, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (title, prompt, description, uploaded_file.name, datetime.now().isoformat()))
 
-# ---------------- MAIN APP ----------------
-else:
-
-    st.sidebar.write("👤", st.session_state.user["username"])
-    menu = st.sidebar.selectbox("Menu",
-        ["Upload", "Explore", "Trending", "Logout"])
-
-    # -------- LOGOUT --------
-    if menu == "Logout":
-        st.session_state.user = None
-        st.rerun()
-
-    # -------- UPLOAD --------
-    if menu == "Upload":
-
-        st.header("Upload Model")
-
-        title = st.text_input("Title")
-        prompt = st.text_area("Prompt Used")
-        file = st.file_uploader("Upload .glb", type=["glb"])
-
-        if st.button("Upload Model"):
-
-            if not file:
-                st.warning("Upload a file.")
-                st.stop()
-
-            if file.size > 10 * 1024 * 1024:
-                st.error("File too large (Max 10MB).")
-                st.stop()
-
-            safe_name = file.name.replace("..", "").replace("/", "")
-            path = f"models/{safe_name}"
-
-            with open(path, "wb") as f:
-                f.write(file.read())
-
-            c.execute("INSERT INTO models (title,prompt,file,user_id) VALUES (?,?,?,?)",
-                      (title, prompt, safe_name, st.session_state.user["id"]))
             conn.commit()
-
-            st.success("Model uploaded.")
-
-    # -------- EXPLORE --------
-    if menu == "Explore":
-
-        st.header("Explore Models")
-
-        search = st.text_input("🔍 Search")
-
-        if search:
-            c.execute("SELECT * FROM models WHERE title LIKE ?",
-                      (f"%{search}%",))
+            st.success("Model uploaded successfully!")
         else:
-            c.execute("SELECT * FROM models")
+            st.error("Title and OBJ file required!")
 
-        models = c.fetchall()
+# =========================
+# EXPLORE PAGE
+# =========================
+if page == "Explore Models":
+    st.title("Explore Community Models")
 
-        for m in models:
+    models = c.execute("SELECT * FROM models ORDER BY id DESC").fetchall()
 
-            st.subheader(m[1])
-            st.write("Prompt:", m[2])
+    for model in models:
+        model_id, title, prompt, description, filename, created_at = model
 
-            # Increase views
-            c.execute("UPDATE models SET views=views+1 WHERE id=?", (m[0],))
-            conn.commit()
+        st.subheader(title)
+        st.write("Prompt:", prompt)
+        st.write("Description:", description)
 
-            # Like count
-            c.execute("SELECT COUNT(*) FROM likes WHERE model_id=?", (m[0],))
-            like_count = c.fetchone()[0]
+        filepath = os.path.join(MODEL_DIR, filename)
 
-            # Avg rating
-            c.execute("SELECT AVG(rating) FROM ratings WHERE model_id=?", (m[0],))
-            avg_rating = c.fetchone()[0]
+        if os.path.exists(filepath):
+            # Encode file to base64
+            with open(filepath, "rb") as f:
+                encoded = base64.b64encode(f.read()).decode()
 
-            st.write(f"👍 {like_count} Likes")
-            if avg_rating:
-                st.write(f"⭐ {round(avg_rating,1)} Average Rating")
+            # Render OBJ using Three.js
+            st.components.v1.html(f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+            <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/loaders/OBJLoader.js"></script>
+            </head>
+            <body style="margin:0;">
+            <div id="viewer" style="width:100%; height:400px;"></div>
+            <script>
+                const scene = new THREE.Scene();
+                const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+                const renderer = new THREE.WebGLRenderer();
+                renderer.setSize(window.innerWidth, 400);
+                document.getElementById('viewer').appendChild(renderer.domElement);
 
-            viewer = f"""
-            <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
-            <model-viewer src="models/{m[3]}" auto-rotate camera-controls style="width:100%; height:400px;"></model-viewer>
-            """
-            html(viewer, height=450)
+                const light = new THREE.DirectionalLight(0xffffff, 1);
+                light.position.set(0, 1, 1).normalize();
+                scene.add(light);
 
-            if st.button(f"Like {m[0]}"):
-                try:
-                    c.execute("INSERT INTO likes (user_id,model_id) VALUES (?,?)",
-                              (st.session_state.user["id"], m[0]))
-                    conn.commit()
-                    st.success("Liked.")
-                except:
-                    st.warning("Already liked.")
+                const loader = new THREE.OBJLoader();
 
-            rating = st.slider(f"Rate {m[0]}", 1, 5)
-            if st.button(f"Submit Rating {m[0]}"):
-                try:
-                    c.execute("INSERT INTO ratings (user_id,model_id,rating) VALUES (?,?,?)",
-                              (st.session_state.user["id"], m[0], rating))
-                    conn.commit()
-                except:
-                    c.execute("UPDATE ratings SET rating=? WHERE user_id=? AND model_id=?",
-                              (rating, st.session_state.user["id"], m[0]))
-                    conn.commit()
+                const objData = atob("{encoded}");
+                const blob = new Blob([objData], {{type: 'text/plain'}});
+                const url = URL.createObjectURL(blob);
 
-            st.markdown("---")
+                loader.load(url, function (object) {{
+                    scene.add(object);
+                }});
 
-    # -------- TRENDING --------
-    if menu == "Trending":
+                camera.position.z = 5;
 
-        st.header("🔥 Trending")
+                function animate() {{
+                    requestAnimationFrame(animate);
+                    renderer.render(scene, camera);
+                }}
+                animate();
+            </script>
+            </body>
+            </html>
+            """, height=420)
 
-        c.execute("""
-        SELECT models.*, COUNT(likes.user_id) as like_count
-        FROM models
-        LEFT JOIN likes ON models.id = likes.model_id
-        GROUP BY models.id
-        ORDER BY like_count DESC, views DESC
-        LIMIT 10
-        """)
-        trending = c.fetchall()
+        # Feedback Section
+        st.markdown("### Feedback")
+        feedbacks = c.execute("SELECT message FROM feedback WHERE model_id=?", (model_id,)).fetchall()
 
-        for m in trending:
-            st.write("🔥", m[1])
+        for fb in feedbacks:
+            st.write("- ", fb[0])
+
+        new_feedback = st.text_input("Add feedback", key=f"fb_{model_id}")
+
+        if st.button("Submit Feedback", key=f"btn_{model_id}"):
+            if new_feedback:
+                c.execute("""
+                    INSERT INTO feedback (model_id, message, created_at)
+                    VALUES (?, ?, ?)
+                """, (model_id, new_feedback, datetime.now().isoformat()))
+                conn.commit()
+                st.success("Feedback added!")
