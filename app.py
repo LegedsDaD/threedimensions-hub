@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import os
 from datetime import datetime
+import hashlib
 import base64
 
 # =========================
@@ -9,17 +10,32 @@ import base64
 # =========================
 st.set_page_config(page_title="ThreeDimensions Hub", layout="wide")
 
-MODEL_DIR = "models"
-DB_FILE = "database.db"
+BASE_DIR = "/tmp"
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+DB_FILE = os.path.join(BASE_DIR, "database.db")
 
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # =========================
-# DATABASE SETUP
+# DATABASE
 # =========================
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+conn = get_connection()
 c = conn.cursor()
 
+# Users
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE,
+    password TEXT
+)
+""")
+
+# Models
 c.execute("""
 CREATE TABLE IF NOT EXISTS models (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,101 +43,166 @@ CREATE TABLE IF NOT EXISTS models (
     prompt TEXT,
     description TEXT,
     filename TEXT,
+    user_id INTEGER,
     created_at TEXT
 )
 """)
 
+# Likes
 c.execute("""
-CREATE TABLE IF NOT EXISTS feedback (
+CREATE TABLE IF NOT EXISTS likes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     model_id INTEGER,
-    message TEXT,
-    created_at TEXT
+    user_id INTEGER
+)
+""")
+
+# Ratings
+c.execute("""
+CREATE TABLE IF NOT EXISTS ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id INTEGER,
+    user_id INTEGER,
+    rating INTEGER
 )
 """)
 
 conn.commit()
 
 # =========================
-# SIDEBAR NAVIGATION
+# SESSION
 # =========================
-st.sidebar.title("ThreeDimensions Hub")
-page = st.sidebar.radio("Navigate", ["Upload Model", "Explore Models"])
+if "user" not in st.session_state:
+    st.session_state.user = None
 
 # =========================
-# UPLOAD PAGE
+# AUTH SYSTEM
 # =========================
-if page == "Upload Model":
-    st.title("Upload Your 3D Model (.OBJ)")
+st.sidebar.title("Account")
 
-    title = st.text_input("Model Title")
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+if not st.session_state.user:
+    email = st.sidebar.text_input("Email")
+    password = st.sidebar.text_input("Password", type="password")
+
+    col1, col2 = st.sidebar.columns(2)
+
+    # SIGNUP
+    if col1.button("Signup"):
+        try:
+            c.execute("INSERT INTO users (email, password) VALUES (?, ?)",
+                      (email, hash_password(password)))
+            conn.commit()
+            st.sidebar.success("Account created! Login now.")
+        except:
+            st.sidebar.error("User already exists")
+
+    # LOGIN
+    if col2.button("Login"):
+        user = c.execute(
+            "SELECT * FROM users WHERE email=? AND password=?",
+            (email, hash_password(password))
+        ).fetchone()
+
+        if user:
+            st.session_state.user = user
+            st.rerun()
+        else:
+            st.sidebar.error("Invalid credentials")
+
+else:
+    st.sidebar.success(f"Logged in as {st.session_state.user[1]}")
+    if st.sidebar.button("Logout"):
+        st.session_state.user = None
+        st.rerun()
+
+# =========================
+# NAVIGATION
+# =========================
+page = st.sidebar.radio("Navigate", ["Explore", "Upload"])
+
+# =========================
+# UPLOAD
+# =========================
+if page == "Upload":
+
+    if not st.session_state.user:
+        st.warning("Login required")
+        st.stop()
+
+    st.title("Upload 3D Model (.OBJ)")
+
+    title = st.text_input("Title")
     prompt = st.text_area("Prompt Used")
     description = st.text_area("Description")
+    uploaded_file = st.file_uploader("Upload OBJ", type=["obj"])
 
-    uploaded_file = st.file_uploader("Upload .OBJ file", type=["obj"])
-
-    if st.button("Submit Model"):
+    if st.button("Upload"):
         if uploaded_file and title:
-            filepath = os.path.join(MODEL_DIR, uploaded_file.name)
 
+            filepath = os.path.join(MODEL_DIR, uploaded_file.name)
             with open(filepath, "wb") as f:
                 f.write(uploaded_file.read())
 
             c.execute("""
-                INSERT INTO models (title, prompt, description, filename, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (title, prompt, description, uploaded_file.name, datetime.now().isoformat()))
+                INSERT INTO models (title, prompt, description, filename, user_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                title,
+                prompt,
+                description,
+                uploaded_file.name,
+                st.session_state.user[0],
+                datetime.now().isoformat()
+            ))
 
             conn.commit()
-            st.success("Model uploaded successfully!")
-        else:
-            st.error("Title and OBJ file required!")
+            st.success("Model Uploaded!")
+            st.rerun()
 
 # =========================
-# EXPLORE PAGE
+# EXPLORE
 # =========================
-if page == "Explore Models":
-    st.title("Explore Community Models")
+if page == "Explore":
 
-    models = c.execute("SELECT * FROM models ORDER BY id DESC").fetchall()
+    st.title("Community Models")
+
+    models = c.execute("""
+        SELECT * FROM models ORDER BY id DESC
+    """).fetchall()
 
     for model in models:
-        model_id, title, prompt, description, filename, created_at = model
+
+        model_id, title, prompt, desc, filename, user_id, created = model
 
         st.subheader(title)
-        st.write("Prompt:", prompt)
-        st.write("Description:", description)
+        st.write(desc)
+        st.caption(f"Uploaded on {created}")
 
+        # ================= 3D PREVIEW =================
         filepath = os.path.join(MODEL_DIR, filename)
 
         if os.path.exists(filepath):
-            # Encode file to base64
             with open(filepath, "rb") as f:
                 encoded = base64.b64encode(f.read()).decode()
 
-            # Render OBJ using Three.js
             st.components.v1.html(f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
             <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
             <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/loaders/OBJLoader.js"></script>
-            </head>
-            <body style="margin:0;">
-            <div id="viewer" style="width:100%; height:400px;"></div>
+            <div id="viewer{model_id}" style="height:400px;"></div>
             <script>
                 const scene = new THREE.Scene();
                 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
                 const renderer = new THREE.WebGLRenderer();
                 renderer.setSize(window.innerWidth, 400);
-                document.getElementById('viewer').appendChild(renderer.domElement);
+                document.getElementById("viewer{model_id}").appendChild(renderer.domElement);
 
                 const light = new THREE.DirectionalLight(0xffffff, 1);
-                light.position.set(0, 1, 1).normalize();
                 scene.add(light);
 
                 const loader = new THREE.OBJLoader();
-
                 const objData = atob("{encoded}");
                 const blob = new Blob([objData], {{type: 'text/plain'}});
                 const url = URL.createObjectURL(blob);
@@ -131,31 +212,56 @@ if page == "Explore Models":
                 }});
 
                 camera.position.z = 5;
-
                 function animate() {{
                     requestAnimationFrame(animate);
                     renderer.render(scene, camera);
                 }}
                 animate();
             </script>
-            </body>
-            </html>
             """, height=420)
 
-        # Feedback Section
-        st.markdown("### Feedback")
-        feedbacks = c.execute("SELECT message FROM feedback WHERE model_id=?", (model_id,)).fetchall()
+        # ================= LIKES =================
+        like_count = c.execute(
+            "SELECT COUNT(*) FROM likes WHERE model_id=?",
+            (model_id,)
+        ).fetchone()[0]
 
-        for fb in feedbacks:
-            st.write("- ", fb[0])
+        col1, col2 = st.columns(2)
 
-        new_feedback = st.text_input("Add feedback", key=f"fb_{model_id}")
-
-        if st.button("Submit Feedback", key=f"btn_{model_id}"):
-            if new_feedback:
-                c.execute("""
-                    INSERT INTO feedback (model_id, message, created_at)
-                    VALUES (?, ?, ?)
-                """, (model_id, new_feedback, datetime.now().isoformat()))
+        if st.session_state.user:
+            if col1.button(f"❤️ Like ({like_count})", key=f"like{model_id}"):
+                c.execute(
+                    "INSERT INTO likes (model_id, user_id) VALUES (?, ?)",
+                    (model_id, st.session_state.user[0])
+                )
                 conn.commit()
-                st.success("Feedback added!")
+                st.rerun()
+        else:
+            col1.write(f"❤️ {like_count}")
+
+        # ================= RATINGS =================
+        avg_rating = c.execute(
+            "SELECT AVG(rating) FROM ratings WHERE model_id=?",
+            (model_id,)
+        ).fetchone()[0]
+
+        if avg_rating:
+            col2.write(f"⭐ {round(avg_rating,1)}/5")
+        else:
+            col2.write("⭐ No ratings")
+
+        if st.session_state.user:
+            rating = st.slider(
+                "Rate this model",
+                1, 5,
+                key=f"rate{model_id}"
+            )
+            if st.button("Submit Rating", key=f"ratebtn{model_id}"):
+                c.execute(
+                    "INSERT INTO ratings (model_id, user_id, rating) VALUES (?, ?, ?)",
+                    (model_id, st.session_state.user[0], rating)
+                )
+                conn.commit()
+                st.rerun()
+
+        st.divider()
